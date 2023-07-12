@@ -104,10 +104,10 @@ def IPCS(comm, xdmffile: str, xdmffacetfile: str, dim: int, degree_u: int,
     zero = np.array((0,) * mesh.geometry.dim, dtype=PETSc.ScalarType)
     bcs_tent = [fem.dirichletbc(u_inlet, inlet_dofs), fem.dirichletbc(
         zero, wall_dofs, V), fem.dirichletbc(zero, obstacle_dofs, V)]
-    a_tent = fem.form(a_tent, jit_options=jit_options)
+    a_tent = fem.form(a_tent)# , jit_options=jit_options)
     A_tent = fem.petsc.assemble_matrix(a_tent, bcs=bcs_tent)
     A_tent.assemble()
-    L_tent = fem.form(L_tent, jit_options=jit_options)
+    L_tent = fem.form(L_tent) #, jit_options=jit_options)
     b_tent = fem.Function(V)
 
     # Step 2: Pressure correction step
@@ -118,17 +118,16 @@ def IPCS(comm, xdmffile: str, xdmffacetfile: str, dim: int, degree_u: int,
     q = ufl.TestFunction(Q)
     a_corr = ufl.inner(ufl.grad(p), ufl.grad(q)) * dx
     L_corr = - w_time * ufl.inner(ufl.div(u_tent), q) * dx
-    a_corr = fem.form(a_corr, jit_options=jit_options)
+    a_corr = fem.form(a_corr) #, jit_options=jit_options)
     A_corr = fem.petsc.assemble_matrix(a_corr, bcs=bcs_corr)
     A_corr.assemble()
 
     b_corr = fem.Function(Q)
-    L_corr = fem.form(L_corr, jit_options=jit_options)
+    L_corr = fem.form(L_corr) #, jit_options=jit_options)
 
     # Step 3: Velocity update
-    a_up = fem.form(ufl.inner(u, v) * dx, jit_options=jit_options)
-    L_up = fem.form((ufl.inner(u_tent, v) - w_time**(-1) * ufl.inner(ufl.grad(phi), v)) * dx,
-                    jit_options=jit_options)
+    a_up = fem.form(ufl.inner(u, v) * dx) #, jit_options=jit_options)
+    L_up = fem.form((ufl.inner(u_tent, v) - w_time**(-1) * ufl.inner(ufl.grad(phi), v)) * dx) #, jit_options=jit_options)
     A_up = fem.petsc.assemble_matrix(a_up)
     A_up.assemble()
     b_up = fem.Function(V)
