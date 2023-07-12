@@ -14,32 +14,31 @@ try:
     from tqdm import tqdm
 except ModuleNotFoundError:
     has_tqdm = False
-    print("To view progress with progressbar please install tqdm: `pip3 install tqdm`")
+    if MPI.COMM_WORLD.rank == 0:
+        print("To view progress with progressbar please install tqdm: `pip3 install tqdm`")
 
-log.set_log_level(log.LogLevel.ERROR)
-
-
-def IPCS(outdir: str, dim: int, degree_u: int,
+def IPCS(comm, xdmffile: str, xdmffacetfile: str, dim: int, degree_u: int,
+         out_u, out_p,
          jit_options: dict = {"cffi_extra_compile_args": ["-Ofast", "-march=native"], "cffi_libraries": ["m"]}):
     assert degree_u >= 2
 
+
     # Read in mesh
-    comm = MPI.COMM_WORLD
-    with io.XDMFFile(comm, f"meshes/channel{dim}D.xdmf", "r") as xdmf:
+    with io.XDMFFile(comm, xdmffile, "r") as xdmf:
         mesh = xdmf.read_mesh(name="mesh")
         tdim = mesh.topology.dim
         fdim = tdim - 1
         mesh.topology.create_connectivity(tdim, tdim)
         mesh.topology.create_connectivity(fdim, tdim)
 
-    with io.XDMFFile(comm, f"meshes/channel{dim}D_facets.xdmf", "r") as xdmf:
+    with io.XDMFFile(comm, xdmffacetfile, "r") as xdmf:
         mt = xdmf.read_meshtags(mesh, "Facet tags")
 
     # Create output files
-    out_u = io.XDMFFile(comm, f"{outdir}/u_{dim}D.xdmf", "w")
-    out_u.write_mesh(mesh)
-    out_p = io.XDMFFile(comm, f"{outdir}/p_{dim}D.xdmf", "w")
-    out_p.write_mesh(mesh)
+    if out_u:
+        out_u.write_mesh(mesh)
+    if out_p:
+        out_p.write_mesh(mesh)
 
     # Define function spaces
     V = fem.VectorFunctionSpace(mesh, ("CG", degree_u))
@@ -171,8 +170,10 @@ def IPCS(outdir: str, dim: int, degree_u: int,
     solver_up.getPC().setType("jacobi")
 
     # Solve problem
-    out_u.write_function(uh, t)
-    out_p.write_function(ph, t)
+    if out_u:
+        out_u.write_function(uh, t)
+    if out_p:
+        out_p.write_function(ph, t)
     N = int(T / dt)
     if has_tqdm:
         time_range = tqdm(range(N))
@@ -222,16 +223,15 @@ def IPCS(outdir: str, dim: int, degree_u: int,
             uh.x.scatter_forward()
 
         with common.Timer("~IO"):
-            out_u.write_function(uh, t)
-            out_p.write_function(ph, t)
+            if out_u:
+                out_u.write_function(uh, t)
+            if out_p:
+                out_p.write_function(ph, t)
 
-    out_u.close()
-    out_p.close()
-
-    t_step_1 = MPI.COMM_WORLD.gather(common.timing("~Step 1"), root=0)
-    t_step_2 = MPI.COMM_WORLD.gather(common.timing("~Step 2"), root=0)
-    t_step_3 = MPI.COMM_WORLD.gather(common.timing("~Step 3"), root=0)
-    io_time = MPI.COMM_WORLD.gather(common.timing("~IO"), root=0)
+    t_step_1 = comm.gather(common.timing("~Step 1"), root=0)
+    t_step_2 = comm.gather(common.timing("~Step 2"), root=0)
+    t_step_3 = comm.gather(common.timing("~Step 3"), root=0)
+    io_time = comm.gather(common.timing("~IO"), root=0)
     if comm.rank == 0:
         print("Time-step breakdown")
         for i, step in enumerate([t_step_1, t_step_2, t_step_3]):
@@ -247,14 +247,35 @@ def IPCS(outdir: str, dim: int, degree_u: int,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Script to run the DFG 2D-3 benchmark"
+        description="Script to run the DFG 2D-3 benchmark\n"
         + "http://www.mathematik.tu-dortmund.de/~featflow/en/benchmarks/cfdbenchmarking/flow/dfg_benchmark3_re100.html",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('xdmffile', metavar='XDMF-FILE', nargs='?', default=f"meshes/channel2D.xdmf")
+    parser.add_argument('xdmffacetfile', metavar='XDMF-FACET-FILE', nargs='?', default=f"meshes/channel2D_facets.xdmf")
     parser.add_argument("--degree-u", default=2, type=int, dest="degree", help="Degree of velocity space")
     _2D = parser.add_mutually_exclusive_group(required=False)
     _2D.add_argument('--3D', dest='threed', action='store_true', help="Use 3D mesh", default=False)
-    parser.add_argument("--outdir", default="results", type=str, dest="outdir", help="Name of output folder")
+    parser.add_argument("--u-output-file", default=None, type=str, dest="u_outfile", help="name of output file for velocity")
+    parser.add_argument("--p-output-file", default=None, type=str, dest="p_outfile", help="name of output file for pressure")
+    parser.add_argument("--verbose", default=0, type=int, dest="verbose", help="be more verbose")
     args = parser.parse_args()
     dim = 3 if args.threed else 2
-    os.system(f"mkdir -p {args.outdir}")
-    IPCS(args.outdir, dim=dim, degree_u=args.degree)
+
+    log.set_log_level(log.LogLevel.INFO if args.verbose > 0 else log.LogLevel.WARNING)
+
+    # Create output files
+    comm = MPI.COMM_WORLD
+    out_u = None
+    if args.u_outfile:
+        out_u = io.XDMFFile(comm, args.u_outfile, "w")
+    out_p = None
+    if args.p_outfile:
+        out_p = io.XDMFFile(comm, args.p_outfile, "w")
+
+    IPCS(comm, args.xdmffile, args.xdmffacetfile, dim=dim, degree_u=args.degree,
+         out_u=out_u, out_p=out_p)
+
+    if out_u:
+        out_u.close()
+    if out_p:
+        out_p.close()
